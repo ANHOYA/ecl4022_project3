@@ -3,3 +3,5 @@ Project_3_RL.pdf
 *.pt
 backup
 runs
+policy
+video
