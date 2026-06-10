@@ -3,5 +3,13 @@ Project_3_RL.pdf
 *.pt
 backup
 runs
+runs_obs3
 policy
 video
+dqn_analysis_report.md
+report_assets
+report_assets_obs3
+__pycache__
+*.tex
+main.pdf
+Project3_final.py

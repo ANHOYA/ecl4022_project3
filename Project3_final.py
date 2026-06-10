@@ -1,8 +1,32 @@
-
-# %%
+import os
+import random
+import math
+import datetime
+import io
+import imageio
+from base64 import b64encode
+from IPython.display import HTML, display
+from collections import deque
+import numpy as np
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+import torchvision.transforms as transforms
+from torch.utils.tensorboard import SummaryWriter
+from minigrid.wrappers import RGBImgObsWrapper
 from minigrid.minigrid_env import MiniGridEnv, MissionSpace
 from minigrid.core.grid import Grid
 from minigrid.core.world_object import Goal, Wall
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Using device:", device)
+
+
+# %%
+
 
 class SimpleEnv(MiniGridEnv):
     # size를 8로 변경하여 내부 6x6 공간 확보
@@ -160,10 +184,10 @@ def main():
     reward_plot(total_reward)
     print("학습 완료!")
 
-    return Q_values
+    return Q_values, total_reward
 
 # 실행
-learned_Q = main()
+learned_Q, q_learning_rewards = main()
 
 # %%
 import io
@@ -173,7 +197,15 @@ from IPython.display import HTML, display
 import numpy as np # 혹시 np 에러가 날 경우를 대비해 추가합니다
 
 # 1. 비디오 생성 함수 (교안 37페이지)
-def display_video(frames, fps=10):
+def display_video(frames, fps=10, filename=None):
+    if isinstance(fps, str):
+        filename = fps
+        fps = 10
+    os.makedirs("video", exist_ok=True)
+    if filename:
+        save_path = os.path.join("video", filename)
+        imageio.mimsave(save_path, frames, format="mp4", fps=fps)
+        print(f"Video saved to {save_path}")
     video_buffer = io.BytesIO()
     imageio.mimsave(video_buffer, frames, format="mp4", fps=fps)
     video_buffer.seek(0)
@@ -226,6 +258,112 @@ def test_and_display(Q_values):
 test_and_display(learned_Q)
 
 # %% [markdown]
+# # SARSA Implementation
+# In this section, we implement the SARSA algorithm (On-policy TD Control) and compare it with Q-learning.
+
+# %%
+# 4. SARSA 메인 루프
+def run_sarsa(env, Q_values, n_episodes, epsilon, epsilon_decay, gamma, lr):
+    total_reward = []
+
+    for i in tqdm(range(n_episodes), desc="Simulating SARSA", unit="step"):
+        obs, info = env.reset(seed=42)
+
+        # 상태(State)를 배열 인덱스에 맞게 변환
+        state = np.array([env.agent_pos[0]-1, env.agent_pos[1]-1, obs["direction"]])
+        done = False
+        reward_sum = 0
+
+        # On-policy: 현재 상태에서 행동 A 선택
+        action = eps_greedy(Q_values, state, epsilon)
+
+        while not done:
+            # 행동 A 가하기 -> 다음 상태 S'와 보상 R
+            next_obs, reward, terminated, truncated, info = env.step(action)
+            next_state = np.array([env.agent_pos[0]-1, env.agent_pos[1]-1, next_obs["direction"]])
+
+            # On-policy: 다음 상태 S'에서 정책에 따라 다음 행동 A' 선택
+            next_action = eps_greedy(Q_values, next_state, epsilon)
+
+            # 변수 분리
+            x, y, d = state[0], state[1], state[2]
+            nx, ny, nd = next_state[0], next_state[1], next_state[2]
+
+            # Q값 업데이트 로직 (SARSA 업데이트 공식)
+            td_target = reward + gamma * Q_values[nx, ny, nd, next_action]
+            td_error = td_target - Q_values[x, y, d, action]
+            Q_values[x, y, d, action] += lr * td_error
+
+            # 상태 및 행동 갱신
+            state = next_state
+            action = next_action
+            reward_sum += reward
+            done = terminated or truncated
+
+        total_reward.append(reward_sum)
+
+        # 에피소드 종료 시 epsilon 감소
+        epsilon = max(epsilon * epsilon_decay, 0.01)
+
+    return Q_values, total_reward
+
+def main_sarsa():
+    env = SimpleEnv(render_mode="rgb_array")
+    Q_values_init = np.zeros((env.width-2, env.height-2, 4, 3))
+
+    epsilon = 1.0
+    epsilon_decay = 0.9999
+    gamma = 0.99
+    lr = 0.005
+    n_episodes = 50000
+
+    print("SARSA 학습을 시작합니다... (시간이 조금 걸릴 수 있습니다)")
+    Q_values, total_reward = run_sarsa(
+        env, Q_values_init, n_episodes, epsilon, epsilon_decay, gamma, lr
+    )
+
+    # 학습 결과 그래프 출력
+    reward_plot(total_reward)
+    print("SARSA 학습 완료!")
+    return Q_values, total_reward
+
+learned_Q_sarsa, sarsa_rewards = main_sarsa()
+
+# %%
+# SARSA 결과 테스트 및 프레임 캡처
+print("--- SARSA 결과 테스트 ---")
+test_and_display(learned_Q_sarsa)
+
+# %% [markdown]
+# # Q-Learning vs SARSA Comparison
+# Here, we compare the training curves of Q-Learning (Off-policy) and SARSA (On-policy) to understand their convergence behaviors in this maze environment.
+
+# %%
+# Q-Learning vs SARSA 학습 곡선 비교 시각화
+def compare_plots(q_rewards, sarsa_rewards, window_size=100):
+    def moving_average(data, window=window_size):
+        return np.convolve(data, np.ones(window)/window, mode='valid')
+
+    plt.figure(figsize=(12, 6))
+    
+    # Smoothed curves
+    plt.plot(moving_average(q_rewards), label="Q-Learning (Smoothed)", color="royalblue", linewidth=2)
+    plt.plot(moving_average(sarsa_rewards), label="SARSA (Smoothed)", color="darkorange", linewidth=2)
+    
+    # Raw rewards (transparent)
+    plt.plot(q_rewards, color="royalblue", alpha=0.15)
+    plt.plot(sarsa_rewards, color="darkorange", alpha=0.15)
+    
+    plt.xlabel("Episodes")
+    plt.ylabel("Reward")
+    plt.title("Q-Learning vs SARSA Reward Comparison")
+    plt.legend()
+    plt.grid(True, linestyle="--", alpha=0.6)
+    plt.show()
+
+compare_plots(q_learning_rewards, sarsa_rewards)
+
+# %% [markdown]
 # # Problem 3: Deep Q-Learning (DQN)
 # In this section, we implement a Deep Q-Network (DQN) to solve the same maze environment.
 # We will compare two different preprocessing approaches:
@@ -252,9 +390,7 @@ import torch.nn.functional as F
 import torchvision.transforms as transforms
 from torch.utils.tensorboard import SummaryWriter
 from minigrid.wrappers import RGBImgObsWrapper
-from minigrid.minigrid_env import MiniGridEnv, MissionSpace
-from minigrid.core.grid import Grid
-from minigrid.core.world_object import Goal, Wall
+
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Using device:", device)
@@ -264,12 +400,7 @@ os.makedirs("video", exist_ok=True)
 
 def get_model_save_path(run_name):
     os.makedirs("policy", exist_ok=True)
-    base_name = f"{run_name}_save.pth"
-    target_path = os.path.join("policy", base_name)
-    if os.path.exists(target_path):
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        target_path = os.path.join("policy", f"{run_name}_save_{timestamp}.pth")
-    return target_path
+    return os.path.join("policy", f"{run_name}_save.pth")
 
 def load_model(model, run_name, filename=None):
     if filename is None:
@@ -478,8 +609,9 @@ def run_dqn(use_grayscale=True, n_episodes=3000, lr=1e-4, batch_size=64, Target_
     writer.close()
     
     # Save the trained model
-    torch.save(model.state_dict(), get_model_save_path(run_name))
-    print(f"Model saved to {get_model_save_path(run_name)}")
+    save_path = get_model_save_path(run_name)
+    torch.save(model.state_dict(), save_path)
+    print(f"Model saved to {save_path}")
     return model, total_rewards
 
 # %% [markdown]
@@ -649,8 +781,9 @@ def run_dqn_early_stopping(use_grayscale=True, n_episodes=3000, lr=1e-4, batch_s
             print(f"[{run_name}] Episode {episode+1}/{n_episodes} - True Reward: {episode_reward:.2f}, Loss: {mean_loss:.4f}, Epsilon: {epsilon:.3f}")
             
     writer.close()
-    torch.save(model.state_dict(), get_model_save_path(run_name))
-    print(f"Model saved to {get_model_save_path(run_name)}")
+    save_path = get_model_save_path(run_name)
+    torch.save(model.state_dict(), save_path)
+    print(f"Model saved to {save_path}")
     return model, total_rewards
 
 # %% [markdown]
@@ -691,9 +824,17 @@ plt.title("DQN Comparison (Fixed vs. Early Stopping)")
 plt.legend()
 plt.show()
 
+# Grayscale ES 모델 객체 생성 및 저장된 가중치 로드
+model_grayscale_es = Model((1, 64, 64), 3).to(device)
+model_grayscale_es = load_model(model_grayscale_es, "DQN_Grayscale_ES")
+
 print("--- Testing Grayscale ES Model ---")
 grayscale_es_frames = test_dqn(model_grayscale_es, use_grayscale=True)
 display_video(grayscale_es_frames, "dqn_grayscale_es_play.mp4")
+
+# RGB ES 모델 객체 생성 및 저장된 가중치 로드
+model_rgb_es = Model((3, 64, 64), 3).to(device)
+model_rgb_es = load_model(model_rgb_es, "DQN_RGB_ES")
 
 print("\n--- Testing RGB ES Model ---")
 rgb_es_frames = test_dqn(model_rgb_es, use_grayscale=False)
