@@ -1,5 +1,6 @@
 Project_3_RL.pdf
 *.pth
+!policy_obs3/*.pth
 *.pt
 backup
 runs
